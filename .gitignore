@@ -1,6 +1,9 @@
 .env
 .env.*
 !.env.example
+
+# Kubernetes secret — contains LiveKit credentials, do not commit
+k8s/secret.yaml
 .DS_Store
 __pycache__
 .idea

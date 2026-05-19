@@ -31,8 +31,8 @@ coverage/
 .cache
 
 # Environment variables
-.env
-.env.*
+# .env
+# .env.*
 
 # VCS, editor, OS
 .git

@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: livekit-agent
+  namespace: livekit-agent
+  labels:
+    app: livekit-agent
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: livekit-agent
+  template:
+    metadata:
+      labels:
+        app: livekit-agent
+    spec:
+      # Allow active voice sessions time to finish before pod is terminated
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: livekit-agent
+          image: agenttestsea.azurecr.io/agent-hone:v3
+          imagePullPolicy: Always
+          env:
+            - name: LIVEKIT_URL
+              valueFrom:
+                secretKeyRef:
+                  name: livekit-credentials
+                  key: LIVEKIT_URL
+            - name: LIVEKIT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: livekit-credentials
+                  key: LIVEKIT_API_KEY
+            - name: LIVEKIT_API_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: livekit-credentials
+                  key: LIVEKIT_API_SECRET
+          resources:
+            requests:
+              # Silero VAD and ai-coustics noise cancellation are CPU-intensive
+              cpu: "1000m"
+              memory: "2Gi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 45
+            periodSeconds: 30
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 45
+            periodSeconds: 15
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            runAsNonRoot: true
+            runAsUser: 10001
