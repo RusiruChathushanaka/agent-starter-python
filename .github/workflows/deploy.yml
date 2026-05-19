@@ -1,0 +1,117 @@
+name: Build and Deploy to AKS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Required for OIDC authentication to Azure (no long-lived secrets)
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  ACR_NAME: agenttestsea
+  IMAGE_NAME: agent-hone
+  AKS_CLUSTER: aks-livekit-agent
+  RESOURCE_GROUP: rg-voice-agent-test-sea-dev
+  NAMESPACE: livekit-agent
+  DEPLOYMENT_NAME: livekit-agent
+
+jobs:
+  # ── Job 1: Run tests on every push and PR ──────────────────────────────────
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v1
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Run tests
+        env:
+          LIVEKIT_URL: ${{ secrets.LIVEKIT_URL }}
+          LIVEKIT_API_KEY: ${{ secrets.LIVEKIT_API_KEY }}
+          LIVEKIT_API_SECRET: ${{ secrets.LIVEKIT_API_SECRET }}
+        run: uv run pytest -v
+
+  # ── Job 2: Build image, push to ACR, deploy to AKS ────────────────────────
+  # Only runs on pushes to main (not PRs), and only after tests pass.
+  build-and-deploy:
+    name: Build, Push & Deploy
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Short Git SHA used as the image tag for full traceability
+      - name: Set image tag
+        run: echo "IMAGE_TAG=${GITHUB_SHA::8}" >> $GITHUB_ENV
+
+      # Authenticate to Azure using OIDC — no client secret required.
+      # Requires AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID
+      # to be set as GitHub Actions secrets (see scripts/setup-github-oidc.ps1).
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Log in to ACR so Docker can push the image
+      - name: Log in to ACR
+        run: az acr login --name ${{ env.ACR_NAME }}
+
+      # Enable BuildKit for efficient layer caching
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build and push — tags with both the short SHA and 'latest'.
+      # Uses GitHub Actions cache to speed up subsequent builds.
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+            ${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Configure kubectl to talk to the AKS cluster
+      - name: Set AKS context
+        uses: azure/aks-set-context@v4
+        with:
+          resource-group: ${{ env.RESOURCE_GROUP }}
+          cluster-name: ${{ env.AKS_CLUSTER }}
+          admin: 'true'
+
+      # Rolling update — updates only the container image, preserving all
+      # other deployment settings (replicas, probes, resource limits, etc.)
+      - name: Update deployment image
+        run: |
+          kubectl set image deployment/${{ env.DEPLOYMENT_NAME }} \
+            ${{ env.DEPLOYMENT_NAME }}=${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} \
+            -n ${{ env.NAMESPACE }}
+
+      # Block until the rollout completes (or fails after 5 minutes)
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/${{ env.DEPLOYMENT_NAME }} \
+            -n ${{ env.NAMESPACE }} \
+            --timeout=300s
